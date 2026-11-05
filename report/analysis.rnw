@@ -1,0 +1,288 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Study: MASLD ELASTO
+% Purpose: knitr analysis file - processed by knitr::knit() to generate analysis.tex
+%
+% NOTE: This file is \input{} into report.tex. Do NOT add \begin{document} / \end{document}.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+<<setup, echo=FALSE, results='hide', message=FALSE, warning=FALSE>>=
+library("knitr")
+library("dplyr")
+library("kableExtra")
+library("gtsummary")
+library("modelsummary")
+
+opts_chunk$set(echo=FALSE, results='hide', message=FALSE, warning=FALSE,
+               fig.path='figures/analysis-', fig.align='center')
+knit_hooks$set(crop = hook_pdfcrop)
+options(scipen = 10, digits = 3, modelsummary_format_numeric_latex = "plain")
+
+## Pipeline results (written by code/00_master.R; run `make res` to refresh)
+res <- readRDS("../data/res.rds")
+
+## Wrap kable output in \begingroup\renewcommand{\arraystretch}{...}...\endgroup
+set_arraystretch <- function(kbl, stretch = 1.375) {
+  structure(
+    paste0("\\begingroup\\renewcommand{\\arraystretch}{",
+           sprintf("%.4g", stretch), "}\n",
+           as.character(kbl),
+           "\n\\endgroup"),
+    class  = class(kbl),
+    format = attr(kbl, "format")
+  )
+}
+@
+
+% ============================================================
+\chapter{Methods}
+% ============================================================
+
+\noindent Aim: evaluate a new SWE-based score for the identification of fibrotic MASH and compare it with established non-invasive methods.
+
+\begin{itemize}
+\setlength\itemsep{0pt}
+\item Endpoint (disease): fibrotic MASH, defined as NAS $\geq$ 4 and fibrosis stage $\geq$ F2, versus the rest (binary).
+\item Fibrosis stage: histological stage, with 1, 1a, 1b and 1c combined to F1.
+\item Excluded: patients without a biopsy (``keine Biopsie'') have no fibrosis stage and no NAS, so the endpoint is undefined and they are excluded from all analyses, including those with clinical cirrhosis (not counted as F4): \Sexpr{paste(res$ids_nobx, collapse = ", ")}.
+\item Non-numeric entries in numeric Excel columns (e.g.\ ``k.a.'') are set to missing.
+\end{itemize}
+
+% ============================================================
+\chapter{Descriptive Statistics}
+\label{chp:descr}
+% ============================================================
+
+\noindent Definitions for Table~\ref{tab:tbl1}:
+\begin{itemize}
+\setlength\itemsep{0pt}
+\item Patients: \Sexpr{res$n_total} patients in the masterfile, of which \Sexpr{res$n_class} have a defined endpoint and are shown (\Sexpr{res$n_fmash} with fibrotic MASH).
+\item Not shown: \Sexpr{res$n_unclass} patients excluded for missing biopsy (see Methods), \Sexpr{res$n_nobx_cirr} of them with clinical cirrhosis.
+\item NAS: the NAS as entered in the Excel file is used. It differs from steatosis + lobular inflammation + ballooning for: \Sexpr{paste(res$nas_mismatch, collapse = "; ")}.
+\item Smoker: 1 (with any additional text) is yes and 2 is no; 0, ``k.a.'' and empty are set to missing (\Sexpr{res$n_smoker_na} patients).
+\item Median (IQR) for continuous variables; n (\%) for categorical variables. Missing values are reported per variable.
+\end{itemize}
+
+<<tbl1, results='asis'>>=
+res$tbl1 %>%
+  as_kable_extra(booktabs = TRUE, linesep = "", longtable = TRUE,
+                 caption = "Clinical, serological and histological characteristics by fibrotic MASH (NAS $\\geq$ 4 and fibrosis $\\geq$ F2). Median (IQR) for continuous variables.",
+                 label = "tbl1",
+                 align = c("l", rep("c", sum(grepl("^stat_", names(res$tbl1$table_body)))))) %>%
+  column_spec(1, width = "5cm") %>%
+  row_spec(0, align = "c") %>%
+  kable_styling(font_size = 8, latex_options = c("hold_position", "repeat_header"),
+                repeat_header_continued = "\\textit{(continued on next page...)}") %>%
+  set_arraystretch()
+@
+
+\noindent Definitions for Figure~\ref{fig:box_outcomes}:
+\begin{itemize}
+\setlength\itemsep{0pt}
+\item Outcomes: fibrotic MASH (NAS $\geq$ 4 and fibrosis $\geq$ F2) and the three fibrosis definitions $\geq$ F2, $\geq$ F3 and F4 (irrespective of NAS), each compared between patients without (No) and with (Yes) the outcome.
+\item Patients: for each outcome, the patients with a defined outcome and both a SWE and a FibroScan value (n in the axis labels). Left out for a missing SWE or FibroScan value: \Sexpr{paste(res$box_ids_miss, collapse = ", ")}.
+\item Box: median and quartiles; whiskers: up to 1.5 times the IQR; points beyond are plotted individually.
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/box_outcomes.pdf}
+\caption{SWE (top) and FibroScan (TE, bottom) stiffness by outcome definition.}
+\label{fig:box_outcomes}
+\end{figure}
+
+\FloatBarrier
+
+% ============================================================
+\chapter{Diagnostic Performance}
+\label{chp:cutoffs}
+% ============================================================
+
+\noindent Definitions for Tables~\ref{tab:auc}, \ref{tab:cut} and~\ref{tab:zone} (apparent, i.e.\ in-sample, values; optimism-corrected values to follow):
+\begin{itemize}
+\setlength\itemsep{0pt}
+\item Patients: \Sexpr{res$sc_n} patients with a defined endpoint and complete data for the covariates of the SWE-based score (\Sexpr{res$sc_events} with fibrotic MASH). The same patients are used for all four methods. Excluded for missing covariates: \Sexpr{paste(res$sc_ids_miss, collapse = ", ")}.
+\item Covariates of the SWE-based score (six, prespecified): SWE stiffness (kPa), log ALT, log AST, platelet count (G/l), BMI (kg/m$^2$) and age (years). AST and ALT are log-transformed because they are right-skewed.
+\item Methods: SWE-based score (logistic regression, predicted probability), SWE-based score by multivariate conditional transformation model (mmlt; Box-Cox type marginal models of the six covariates with shift and scale depending on the endpoint and joint Gaussian dependence; score is the log-likelihood ratio $\log f(x\mid D=1) - \log f(x\mid D=0)$, so cut-offs are on the log scale), FAST (value of the Excel column, which equals the published formula with FibroScan stiffness, CAP and AST on the probability scale), SWE alone (kPa) and FibroScan transient elastography (TE, kPa) alone.
+\item AUC: area under the ROC curve, 95\% confidence interval by the DeLong method (\texttt{pROC}). The interval does not account for the model fitting, so the SWE-based score is optimistic.
+\item A score at or above the cut-off is test positive. Candidate cut-offs are the observed values.
+\item Sens $\geq$ 90\%: highest cut-off with sensitivity $\geq$ 90\%. Spec $\geq$ 90\%: lowest cut-off with specificity $\geq$ 90\%. Youden: cut-off maximising sensitivity + specificity $-$ 1 (lowest cut-off if tied). Because the data are discrete, the achieved values slightly exceed 90\%.
+\item PPV/NPV are at the prevalence of this sample. LR+ and LR$-$: positive and negative likelihood ratio.
+\item FAST: the published cut-offs are used instead of data-driven ones: 0.35 for rule-out (score $<$ 0.35) and 0.67 for rule-in (score $\geq$ 0.67). The achieved sensitivity and specificity are therefore not 90\%. The Youden cut-off for FAST is data-driven.
+\item Rule-out: score below the cut-off for sensitivity $\geq$ 90\%. Rule-in: score at or above the cut-off for specificity $\geq$ 90\%. Grey zone: in between.
+\item Fitted models (Tables~\ref{tab:lrcoef}, \ref{tab:mmmarg} and~\ref{tab:mmdep}) are the apparent fits on all \Sexpr{res$sc_n} patients. LR: coefficients on the log-odds scale with odds ratios per one unit of the covariate (original scale, not standardised); 95\% confidence intervals are profile-likelihood intervals.
+\item mmlt: for each covariate, the shift and the (log-)scale term of the endpoint ($D=1$ vs $D=0$) in the Box-Cox type marginal model, with Wald standard errors and p-values (the parameterisation is that of \texttt{tram}). A positive shift means higher values in fibrotic MASH. The coefficients of the Bernstein basis of the marginal transformations are nuisance parameters and not shown. Dependence: correlation matrix of the joint Gaussian model, i.e.\ the correlations between the covariates after the marginal transformations, as given by \texttt{coef} with \texttt{type} set to \texttt{Corr}; standard errors are not shown.
+\item ROC curves (Figure~\ref{fig:roc_fmash}) are empirical, from all observed cut-offs, with the AUC in the legend.
+\end{itemize}
+
+<<tbl_lrcoef, results='asis'>>=
+lab <- c("(Intercept)" = "Intercept", swe = "SWE, kPa", lalt = "log ALT", last = "log AST",
+         plt = "Platelets, G/l", bmi = "BMI, kg/m$^2$", age = "Age, years")
+modelsummary(list("Log odds (95\\% CI)" = res$sc_lr_fit, "Odds ratio (95\\% CI)" = res$sc_lr_fit),
+             exponentiate = c(FALSE, TRUE), coef_rename = lab, fmt = 3,
+             estimate = "{estimate} ({conf.low}, {conf.high})", statistic = NULL,
+             gof_map = "nobs", escape = FALSE, output = "kableExtra",
+             title = "Coefficients of the SWE-based score (logistic regression, apparent fit).") %>%
+  kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  set_arraystretch()
+@
+
+<<tbl_mmmarg, results='asis'>>=
+mt <- res$sc_mm_marg
+mt$variable <- lab[mt$variable]
+fmt_p <- function(p) ifelse(p < 0.001, "<0.001", sprintf("%.3f", p))
+mt <- data.frame(mt$variable,
+                 sprintf("%.3f (%.3f)", mt$shift, mt$shift_se), fmt_p(mt$shift_p),
+                 sprintf("%.3f (%.3f)", mt$scale, mt$scale_se), fmt_p(mt$scale_p))
+kable(mt, format = "latex", booktabs = TRUE, linesep = "", escape = FALSE,
+      col.names = c("Covariate", "Shift (SE)", "p", "Scale (SE)", "p"),
+      align = c("l", rep("c", 4)),
+      caption = "mmlt: shift and scale terms of the endpoint in the marginal models (apparent fit).",
+      label = "mmmarg") %>%
+  kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  set_arraystretch()
+@
+
+<<tbl_mmdep, results='asis'>>=
+## Correlation matrix, lower triangle
+cm <- res$sc_mm_corr
+cs <- matrix(sprintf("%.2f", cm), nrow(cm), dimnames = list(lab[rownames(cm)], lab[colnames(cm)]))
+cs[upper.tri(cs)] <- ""
+kable(cs, format = "latex", booktabs = TRUE, linesep = "", escape = FALSE,
+      align = c("l", rep("c", ncol(cs))),
+      caption = "mmlt: correlation matrix of the covariates in the joint model (lower triangle, apparent fit).",
+      label = "mmdep") %>%
+  kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  set_arraystretch()
+@
+
+<<tbl_auc, results='asis'>>=
+at <- res$sc_auc_cmp
+at$ci <- sprintf("%.2f--%.2f", at$lo, at$hi)
+at$auc <- sprintf("%.2f", at$auc)
+kable(at[c("method", "auc", "ci")], format = "latex", booktabs = TRUE, linesep = "",
+      col.names = c("Method", "AUC", "95\\% CI"), escape = FALSE,
+      align = c("l", "c", "c"),
+      caption = "Apparent AUC with DeLong 95\\% confidence interval.",
+      label = "auc") %>%
+  kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  set_arraystretch()
+@
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.5\textwidth]{figures/roc_fmash.pdf}
+\caption{Empirical ROC curves for fibrotic MASH: SWE-based score (LR and mmlt, apparent) and FAST.}
+\label{fig:roc_fmash}
+\end{figure}
+
+<<tbl_cut, results='asis'>>=
+ct <- res$sc_cut
+ct$method <- ifelse(duplicated(ct$method), "", ct$method)
+ct$cutoff <- ifelse(ct$cutoff < 1, sprintf("%.3f", ct$cutoff), sprintf("%.1f", ct$cutoff))
+ct$criterion <- sub("Sens >= 90%", "Sens $\\geq$ 90\\%", sub("Spec >= 90%", "Spec $\\geq$ 90\\%", ct$criterion, fixed = TRUE), fixed = TRUE)
+## FAST: published cut-offs (rule-out and rule-in) in the first two rows
+ct$criterion[res$sc_cut$method == "FAST" & grepl("Sens", res$sc_cut$criterion)] <- "Published rule-out"
+ct$criterion[res$sc_cut$method == "FAST" & grepl("Spec", res$sc_cut$criterion)] <- "Published rule-in"
+for (v in c("sens", "spec")) ct[[v]] <- sprintf("%.3f", ct[[v]])
+for (v in c("ppv", "npv", "acc", "youden", "lr_pos", "lr_neg")) ct[[v]] <- sprintf("%.2f", ct[[v]])
+kable(ct, format = "latex", booktabs = TRUE, linesep = c("", "", "\\addlinespace"), escape = FALSE,
+      col.names = c("Method", "Criterion", "Cut-off", "Sens", "Spec", "PPV", "NPV",
+                    "Acc", "Youden", "LR+", "LR$-$"),
+      align = c("l", "l", rep("c", 9)),
+      caption = "Apparent cut-offs and performance for fibrotic MASH.",
+      label = "cut") %>%
+  kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  set_arraystretch()
+@
+
+<<tbl_zone, results='asis'>>=
+zt <- res$sc_zone
+zt[c("rule_out", "grey", "rule_in")] <- lapply(zt[c("rule_out", "grey", "rule_in")],
+                                               function(x) sprintf("%.1f", 100 * x))
+fmt_ct <- function(x) ifelse(x < 1, sprintf("%.3f", x), sprintf("%.1f", x))
+zt$cut_out <- fmt_ct(zt$cut_out); zt$cut_in <- fmt_ct(zt$cut_in)
+kable(zt, format = "latex", booktabs = TRUE, linesep = "", escape = FALSE,
+      col.names = c("Method", "Rule-out cut-off", "Rule-in cut-off",
+                    "Rule-out, \\%", "Grey zone, \\%", "Rule-in, \\%"),
+      align = c("l", rep("c", 5)),
+      caption = "Proportion of patients in the rule-out, grey-zone and rule-in categories (apparent).",
+      label = "zone") %>%
+  kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  set_arraystretch()
+@
+
+\FloatBarrier
+
+% ============================================================
+\chapter{Liver Fibrosis}
+\label{chp:fibrosis}
+% ============================================================
+
+\noindent Definitions for Tables~\ref{tab:fbauc}, \ref{tab:fb1}, \ref{tab:fb2} and~\ref{tab:fb3} (apparent values):
+\begin{itemize}
+\setlength\itemsep{0pt}
+\item Outcomes: fibrosis stage $\geq$ F2 (F0/F1 vs F2--F4), $\geq$ F3 (F0--F2 vs F3--F4) and F4 (F0--F3 vs F4), irrespective of NAS.
+\item Patients: \Sexpr{res$fb_n} patients with a fibrosis stage and both SWE and FibroScan values (F0/F1/F2/F3/F4: \Sexpr{paste(res$fb_stage_n, collapse = "/")}). Patients without a biopsy are excluded (see Methods). Excluded for a missing SWE or FibroScan value: \Sexpr{paste(res$fb_ids_miss, collapse = ", ")}.
+\item ROC curves (Figure~\ref{fig:roc_fibrosis}) are empirical, from all observed cut-offs, with the AUC in the legend.\item Cut-offs, PPV/NPV, LR+ and LR$-$ and AUC (DeLong 95\% CI) as defined in Chapter~\ref{chp:cutoffs}. The AUCs of all three outcomes are in one table, followed by one cut-off table per outcome. PPV/NPV are at the prevalence of this sample for the respective outcome.
+\end{itemize}
+
+<<tbl_fb_auc, results='asis'>>=
+## AUC (95% CI): rows methods, columns outcomes
+fa <- sapply(res$fb_res, function(r)
+  sprintf("%.2f (%.2f--%.2f)", r$auc$auc, r$auc$lo, r$auc$hi))
+fa <- data.frame(Method = res$fb_res[[1]]$auc$method, fa, check.names = FALSE)
+kable(fa, format = "latex", booktabs = TRUE, linesep = "", escape = FALSE,
+      col.names = c("Method", paste0(names(res$fb_res),
+                    " (", sapply(res$fb_res, function(r) r$events), "/", res$fb_n, ")")),
+      align = c("l", rep("c", 3)),
+      caption = "Apparent AUC (DeLong 95\\% CI) by fibrosis outcome (events/patients in brackets).",
+      label = "fbauc") %>%
+  kable_styling(font_size = 8, latex_options = "hold_position") %>%
+  set_arraystretch()
+@
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{figures/roc_fibrosis.pdf}
+\caption{Empirical ROC curves of SWE and FibroScan (TE) for the three fibrosis outcomes.}
+\label{fig:roc_fibrosis}
+\end{figure}
+
+<<tbl_fb, results='asis'>>=
+for (i in seq_along(res$fb_res)) {
+  r <- res$fb_res[[i]]
+  ct <- r$cut
+  ct$method <- ifelse(duplicated(ct$method), "", ct$method)
+  ct$cutoff <- sprintf("%.1f", ct$cutoff)
+  ct$criterion <- sub("Sens >= 90%", "Sens $\\geq$ 90\\%", sub("Spec >= 90%", "Spec $\\geq$ 90\\%", ct$criterion, fixed = TRUE), fixed = TRUE)
+  for (v in c("sens", "spec")) ct[[v]] <- sprintf("%.3f", ct[[v]])
+  for (v in c("ppv", "npv", "acc", "youden", "lr_pos", "lr_neg")) ct[[v]] <- sprintf("%.2f", ct[[v]])
+  ct <- ct[c("method", "criterion", "cutoff", "sens", "spec", "ppv", "npv",
+             "acc", "youden", "lr_pos", "lr_neg")]
+  print(kable(ct, format = "latex", booktabs = TRUE, linesep = c("", "", "\\addlinespace"),
+        escape = FALSE,
+        col.names = c("Method", "Criterion", "Cut-off", "Sens", "Spec",
+                      "PPV", "NPV", "Acc", "Youden", "LR+", "LR$-$"),
+        align = c("l", "l", rep("c", 9)),
+        caption = sprintf("Apparent cut-offs and performance for %s (n = %d, %d with the outcome).",
+                          names(res$fb_res)[i], r$n, r$events),
+        label = paste0("fb", i)) %>%
+    kable_styling(font_size = 8, latex_options = "hold_position") %>%
+    set_arraystretch())
+}
+@
+
+\FloatBarrier
+
+% ============================================================
+\chapter{Summary}
+% ============================================================
+
+%%%%%%%%%%%%%%%%
+\chapter*{Appendix}
+\addcontentsline{toc}{chapter}{Appendix}
+%%%%%%%%%%%%%%%%
+R session info:
+<<sessionInfo, results='asis'>>=
+toLatex(sessionInfo())
+@
